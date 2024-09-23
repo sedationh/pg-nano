@@ -5,7 +5,7 @@ import {
 import { watch } from 'chokidar'
 import mri from 'mri'
 import path from 'node:path'
-import { Client } from 'pg-nano'
+import { Client, ConnectionError } from 'pg-nano'
 import { sql } from 'pg-native'
 import { camel, mapKeys } from 'radashi'
 import { resolveConfig, type UserConfig } from './config/config.js'
@@ -42,6 +42,7 @@ export function getEnv(cwd: string, options: EnvOptions = {}) {
   cache.set(key, env)
   return env
 }
+
 
 async function loadEnv(cwd: string, options: EnvOptions) {
   const configFilePath = findConfigFile(cwd)
@@ -98,17 +99,46 @@ async function loadEnv(cwd: string, options: EnvOptions) {
     verbose: options.verbose,
     watcher: options.watch
       ? watch([...config.schema.include, ...userConfigDependencies], {
-          cwd: root,
-          ignored: [
-            ...config.schema.exclude,
-            config.generate.pluginSqlDir,
-            '**/.pg-nano/**',
-          ],
-        })
+        cwd: root,
+        ignored: [
+          ...config.schema.exclude,
+          config.generate.pluginSqlDir,
+          '**/.pg-nano/**',
+        ],
+      })
       : undefined,
     get client() {
       return (client ??= (async () => {
         events.emit('connect', config.dev.connectionString)
+
+        const isDatabaseExistsClient = new Client({
+          maxRetries: 3,
+        })
+        const dsn = new URL(config.dev.connectionString!);
+        const databaseName = dsn.pathname?.slice(1);
+        if (!databaseName.trim()) {
+          throw new ConnectionError("databaseName is empty");
+        }
+        dsn.pathname = "/postgres"
+        const createDsn = dsn.toString()
+        try {
+          await isDatabaseExistsClient.connect(createDsn);
+          // create database if it doesn't exist
+          await isDatabaseExistsClient.query(sql`
+            CREATE DATABASE ${[{ type: "id", id: databaseName }]}
+          `)
+          log(`DATABASE: ${databaseName} CREATED`)
+        } catch (error) {
+          /**
+           * 1. connection error
+           * 2. database already exists
+           *  database "2" already exists
+           */
+          const regex = /database\s"(\w+)"\salready\sexists/;
+          if (!regex.test((error as Error)?.message)) {
+            throw error
+          }
+        }
 
         const client = new Client()
 
